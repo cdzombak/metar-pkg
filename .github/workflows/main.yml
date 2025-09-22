@@ -98,8 +98,8 @@ jobs:
           - arch: arm64
             qemu_arch: aarch64
             distro: ubuntu24.04
-          - arch: i386
-            qemu_arch: i386
+          - arch: armv7
+            qemu_arch: armv7
             distro: ubuntu24.04
 
     steps:
@@ -203,7 +203,7 @@ jobs:
           # Create package structure
           mkdir -p pkg/usr/bin pkg/usr/share/man/man1
 
-          for arch in amd64 arm64 i386; do
+          for arch in amd64 arm64 armv7; do
             echo "Building ${arch} package..."
 
             # Copy binary
@@ -213,11 +213,17 @@ jobs:
             # Copy man page if it exists
             cp src/metar.1 pkg/usr/share/man/man1/ || true
 
+            # Map architecture names for Debian packages
+            case "${arch}" in
+              armv7) deb_arch="armhf" ;;
+              *) deb_arch="${arch}" ;;
+            esac
+
             fpm -s dir -t deb \
               -n metar \
               -v "${VERSION_NO_V}" \
-              -a "${arch}" \
-              -p "out/metar_${VERSION_NO_V}_${arch}.deb" \
+              -a "${deb_arch}" \
+              -p "out/metar_${VERSION_NO_V}_${deb_arch}.deb" \
               --description "Command-line METAR weather data tool" \
               --url "https://github.com/RyuKojiro/metar" \
               --license "MIT" \
@@ -232,11 +238,13 @@ jobs:
           mkdir ./gh-release
           cp ./*.deb ./gh-release/
 
-          # Create tarballs for Homebrew from binaries
+          # Create tarballs for Homebrew from binaries (only amd64 and arm64 for Darwin)
           for arch in amd64 arm64; do
             tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
             tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
           done
+          # Create Linux armv7 tarball
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-armv7.tar.gz -C ../binaries/metar-binary-armv7 metar-linux-armv7
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
