@@ -50,11 +50,15 @@ jobs:
 
           # Check if we already have a version for today
           if [ -f VERSION-COUNTER ]; then
-            CURRENT_DATE=$(head -1 VERSION-COUNTER)
-            if [ "$CURRENT_DATE" = "$BUILD_DATE" ]; then
-              COUNTER=$(tail -1 VERSION-COUNTER)
-              COUNTER=$((COUNTER + 1))
+            # Read the VERSION-COUNTER file - should have date on line 1, counter on line 2
+            CURRENT_DATE=$(sed -n '1p' VERSION-COUNTER)
+            CURRENT_COUNTER=$(sed -n '2p' VERSION-COUNTER)
+
+            if [ "$CURRENT_DATE" = "$BUILD_DATE" ] && [ -n "$CURRENT_COUNTER" ]; then
+              # Same date and we have a valid counter, increment it
+              COUNTER=$((CURRENT_COUNTER + 1))
             else
+              # Different date or invalid counter, start fresh
               COUNTER=1
             fi
           else
@@ -370,8 +374,10 @@ jobs:
       - name: Update tracking files
         run: |
           echo "${{ needs.check-updates.outputs.upstream_sha }}" > LAST-COMMIT-SHA
-          echo "${{ needs.check-updates.outputs.build_date }}" > VERSION-COUNTER
-          echo "${{ needs.check-updates.outputs.counter }}" >> VERSION-COUNTER
+          {
+            echo "${{ needs.check-updates.outputs.build_date }}"
+            echo "${{ needs.check-updates.outputs.counter }}"
+          } > VERSION-COUNTER
 
       - name: Commit tracking files
         uses: EndBug/add-and-commit@v9
