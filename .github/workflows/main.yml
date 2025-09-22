@@ -175,9 +175,10 @@ jobs:
 
       - name: Download upstream source
         run: |
-          curl -L https://github.com/RyuKojiro/metar/archive/refs/heads/master.tar.gz -o metar-source.tar.gz
-          tar -xzf metar-source.tar.gz
-          mv metar-master src
+          curl -L "https://github.com/${{ env.UPSTREAM_REPO }}/archive/${{ needs.check-updates.outputs.upstream_sha }}.tar.gz" -o upstream.tar.gz
+          tar -xzf upstream.tar.gz
+          mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
+          rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
 
       - name: Install dependencies
         run: |
