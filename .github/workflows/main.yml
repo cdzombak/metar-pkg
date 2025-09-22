@@ -118,9 +118,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libcurl4-openssl-dev
-          make clean
-          LDLIBS="-lcurl" make
-          mkdir -p out
+          mkdir -p bin out
+          gcc -Wall -o bin/metar src/main.c -lcurl
           cp bin/metar out/metar-linux-${{ matrix.platform.arch }}
 
       - name: Build binary (emulated ${{ matrix.platform.arch }})
@@ -143,8 +142,8 @@ jobs:
 
           run: |
             cd /workspace
-            make clean
-            LDLIBS="-lcurl" make
+            mkdir -p bin
+            gcc -Wall -o bin/metar src/main.c -lcurl
             cp bin/metar out/metar-linux-${{ matrix.platform.arch }}
 
       - name: Verify binary
