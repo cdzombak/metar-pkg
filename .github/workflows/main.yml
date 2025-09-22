@@ -267,9 +267,6 @@ jobs:
           mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
           rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
 
-      - name: Copy Dockerfile
-        run: cp Dockerfile .
-
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
