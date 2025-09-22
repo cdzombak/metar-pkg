@@ -140,10 +140,14 @@ jobs:
           make
           cp bin/metar out/metar-linux-arm64
 
-          # Build for i386 - skip for now due to multilib conflicts
-          # TODO: Implement i386 build in separate job or container
-          echo "i386 build skipped due to toolchain conflicts"
-          cp bin/metar out/metar-linux-i386  # Use amd64 as placeholder
+          # Build for i386 using Docker to avoid toolchain conflicts
+          docker run --rm -v "$PWD:/src" -w /src i386/ubuntu:20.04 bash -c '
+            apt-get update &&
+            apt-get install -y build-essential libcurl4-openssl-dev &&
+            make clean &&
+            make &&
+            cp bin/metar /src/out/metar-linux-i386
+          '
 
       - name: Verify cross-compiled binaries
         run: |
