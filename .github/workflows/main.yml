@@ -86,10 +86,21 @@ jobs:
       uses: raven-actions/actionlint@v2
 
   build:
-    name: Build and Package
+    name: Build (${{ matrix.platform.arch }})
     needs: check-updates
     if: needs.check-updates.outputs.has_updates == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - arch: amd64
+            # Native build on x86_64 runner
+          - arch: arm64
+            qemu_arch: aarch64
+            distro: ubuntu24.04
+          - arch: i386
+            qemu_arch: i386
+            distro: ubuntu24.04
 
     steps:
       - name: Checkout
@@ -102,16 +113,76 @@ jobs:
           mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
           rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
 
-      - name: Install build dependencies
+      - name: Build binary (native amd64)
+        if: matrix.platform.arch == 'amd64'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libcurl4-openssl-dev
+          make clean
+          make
+          mkdir -p out
+          cp bin/metar out/metar-linux-${{ matrix.platform.arch }}
 
-          # Install ARM64 cross-compilation toolchain
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev:arm64
+      - name: Build binary (emulated ${{ matrix.platform.arch }})
+        if: matrix.platform.arch != 'amd64'
+        uses: uraimo/run-on-arch-action@v3
+        with:
+          arch: ${{ matrix.platform.qemu_arch }}
+          distro: ${{ matrix.platform.distro }}
+          githubToken: ${{ github.token }}
+
+          setup: |
+            mkdir -p "${PWD}/out"
+
+          dockerRunArgs: |
+            --volume "${PWD}:/workspace"
+
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y build-essential libcurl4-openssl-dev
+
+          run: |
+            cd /workspace
+            make clean
+            make
+            cp bin/metar out/metar-linux-${{ matrix.platform.arch }}
+
+      - name: Verify binary
+        run: |
+          echo "=== Binary architecture ==="
+          file out/metar-linux-${{ matrix.platform.arch }}
+          echo "=== Binary size ==="
+          ls -lh out/metar-linux-${{ matrix.platform.arch }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: metar-binary-${{ matrix.platform.arch }}
+          path: out/metar-linux-${{ matrix.platform.arch }}
+
+  package:
+    name: Build Packages
+    needs: [check-updates, build]
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download upstream source (for man page)
+        run: |
+          wget -O upstream.tar.gz "https://github.com/${{ env.UPSTREAM_REPO }}/archive/${{ needs.check-updates.outputs.upstream_sha }}.tar.gz"
+          tar -xzf upstream.tar.gz
+          mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
+          rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: metar-binary-*
+          path: binaries
+          merge-multiple: false
 
       - name: Setup Ruby for fpm
         uses: ruby/setup-ruby@v1
@@ -122,95 +193,38 @@ jobs:
         run: |
           gem install --no-document fpm -v "$FPM_VERSION"
 
-      - name: Build binaries
-        run: |
-          mkdir -p out
-
-          # Build for AMD64 (native)
-          make clean
-          make
-          cp bin/metar out/metar-linux-amd64
-
-          # Build for ARM64 (cross-compile)
-          make clean
-          CC=aarch64-linux-gnu-gcc \
-          CFLAGS="-Wall" \
-          LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
-          LDLIBS="-lcurl" \
-          make
-          cp bin/metar out/metar-linux-arm64
-
-          # Build for i386 using Docker to avoid toolchain conflicts
-          docker run --rm -v "$PWD:/src" -w /src i386/ubuntu:20.04 bash -c '
-            apt-get update &&
-            apt-get install -y build-essential libcurl4-openssl-dev &&
-            make clean &&
-            make &&
-            cp bin/metar /src/out/metar-linux-i386
-          '
-
-      - name: Verify cross-compiled binaries
-        run: |
-          echo "=== Binary architectures ==="
-          file out/metar-linux-amd64
-          file out/metar-linux-arm64
-          file out/metar-linux-i386
-
-          echo "=== Binary sizes ==="
-          ls -lh out/metar-linux-*
-
       - name: Build Debian packages
         run: |
           VERSION_NO_V="${{ needs.check-updates.outputs.version }}"
           VERSION_NO_V="${VERSION_NO_V:1}"  # Remove 'v' prefix
 
+          mkdir -p out
+
           # Create package structure
           mkdir -p pkg/usr/bin pkg/usr/share/man/man1
 
-          # AMD64 package
-          cp out/metar-linux-amd64 pkg/usr/bin/metar
-          cp src/metar.1 pkg/usr/share/man/man1/ || true  # Man page might not exist
-          chmod 755 pkg/usr/bin/metar
+          for arch in amd64 arm64 i386; do
+            echo "Building ${arch} package..."
 
-          fpm -s dir -t deb \
-            -n metar \
-            -v "${VERSION_NO_V}" \
-            -a amd64 \
-            -p "out/metar_${VERSION_NO_V}_amd64.deb" \
-            --description "Command-line METAR weather data tool" \
-            --url "https://github.com/RyuKojiro/metar" \
-            --license "MIT" \
-            --maintainer "cdzombak <cdzombak@gmail.com>" \
-            --depends "libcurl4" \
-            -C pkg .
+            # Copy binary
+            cp binaries/metar-binary-${arch}/metar-linux-${arch} pkg/usr/bin/metar
+            chmod 755 pkg/usr/bin/metar
 
-          # ARM64 package
-          cp out/metar-linux-arm64 pkg/usr/bin/metar
-          fpm -s dir -t deb \
-            -n metar \
-            -v "${VERSION_NO_V}" \
-            -a arm64 \
-            -p "out/metar_${VERSION_NO_V}_arm64.deb" \
-            --description "Command-line METAR weather data tool" \
-            --url "https://github.com/RyuKojiro/metar" \
-            --license "MIT" \
-            --maintainer "cdzombak <cdzombak@gmail.com>" \
-            --depends "libcurl4" \
-            -C pkg .
+            # Copy man page if it exists
+            cp src/metar.1 pkg/usr/share/man/man1/ || true
 
-          # i386 package
-          cp out/metar-linux-i386 pkg/usr/bin/metar
-          fpm -s dir -t deb \
-            -n metar \
-            -v "${VERSION_NO_V}" \
-            -a i386 \
-            -p "out/metar_${VERSION_NO_V}_i386.deb" \
-            --description "Command-line METAR weather data tool" \
-            --url "https://github.com/RyuKojiro/metar" \
-            --license "MIT" \
-            --maintainer "cdzombak <cdzombak@gmail.com>" \
-            --depends "libcurl4" \
-            -C pkg .
+            fpm -s dir -t deb \
+              -n metar \
+              -v "${VERSION_NO_V}" \
+              -a "${arch}" \
+              -p "out/metar_${VERSION_NO_V}_${arch}.deb" \
+              --description "Command-line METAR weather data tool" \
+              --url "https://github.com/RyuKojiro/metar" \
+              --license "MIT" \
+              --maintainer "cdzombak <cdzombak@gmail.com>" \
+              --depends "libcurl4" \
+              -C pkg .
+          done
 
       - name: Prepare release artifacts
         working-directory: out/
@@ -218,11 +232,11 @@ jobs:
           mkdir ./gh-release
           cp ./*.deb ./gh-release/
 
-          # Create tarballs for Homebrew
-          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz metar-linux-amd64
-          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz metar-linux-arm64
-          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz metar-linux-amd64
-          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz metar-linux-arm64
+          # Create tarballs for Homebrew from binaries
+          for arch in amd64 arm64; do
+            tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
+            tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -232,7 +246,7 @@ jobs:
 
   docker:
     name: Docker Images
-    needs: [check-updates, build]
+    needs: [check-updates, package]
     if: needs.check-updates.outputs.has_updates == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -295,7 +309,7 @@ jobs:
 
   finalize:
     name: Finalize Release
-    needs: [check-updates, build, docker]
+    needs: [check-updates, package, docker]
     if: needs.check-updates.outputs.has_updates == 'true'
     runs-on: ubuntu-latest
     steps:
