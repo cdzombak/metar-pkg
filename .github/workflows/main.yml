@@ -62,9 +62,11 @@ jobs:
           fi
 
           VERSION="v${BUILD_DATE}.${COUNTER}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
-          echo "counter=${COUNTER}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${VERSION}"
+            echo "build_date=${BUILD_DATE}"
+            echo "counter=${COUNTER}"
+          } >> "$GITHUB_OUTPUT"
           echo "Generated version: ${VERSION}"
 
     outputs:
