@@ -1,0 +1,387 @@
+name: Build and Release metar
+
+"on":
+  schedule:
+    - cron: "0 6 * * *"  # Daily at 6 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  DOCKER_PLATFORMS: "linux/amd64,linux/arm64,linux/386,linux/arm/v7"
+  FPM_VERSION: 1.15.1
+  UPSTREAM_REPO: "RyuKojiro/metar"
+
+jobs:
+  check-updates:
+    name: Check for Updates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get upstream latest commit
+        id: upstream
+        run: |
+          LATEST_SHA=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/commits/master" | jq -r '.sha')
+          echo "latest_sha=${LATEST_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream SHA: ${LATEST_SHA}"
+
+      - name: Get last processed commit
+        id: last_build
+        run: |
+          if [ -f LAST-COMMIT-SHA ]; then
+            LAST_SHA=$(cat LAST-COMMIT-SHA)
+            echo "last_sha=${LAST_SHA}" >> "$GITHUB_OUTPUT"
+            echo "Last processed SHA: ${LAST_SHA}"
+          else
+            echo "last_sha=" >> "$GITHUB_OUTPUT"
+            echo "No previous build found"
+          fi
+
+      - name: Generate version number
+        id: version
+        run: |
+          BUILD_DATE=$(date +%Y.%m.%d)
+
+          # Check if we already have a version for today
+          if [ -f VERSION-COUNTER ]; then
+            CURRENT_DATE=$(head -1 VERSION-COUNTER)
+            if [ "$CURRENT_DATE" = "$BUILD_DATE" ]; then
+              COUNTER=$(tail -1 VERSION-COUNTER)
+              COUNTER=$((COUNTER + 1))
+            else
+              COUNTER=1
+            fi
+          else
+            COUNTER=1
+          fi
+
+          VERSION="v${BUILD_DATE}.${COUNTER}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "counter=${COUNTER}" >> "$GITHUB_OUTPUT"
+          echo "Generated version: ${VERSION}"
+
+    outputs:
+      upstream_sha: ${{ steps.upstream.outputs.latest_sha }}
+      last_sha: ${{ steps.last_build.outputs.last_sha }}
+      version: ${{ steps.version.outputs.version }}
+      build_date: ${{ steps.version.outputs.build_date }}
+      counter: ${{ steps.version.outputs.counter }}
+      has_updates: ${{ steps.upstream.outputs.latest_sha != steps.last_build.outputs.last_sha }}
+
+  actionlint:
+    name: Lint GitHub Actions
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Run actionlint
+      uses: raven-actions/actionlint@v2
+
+  build:
+    name: Build and Package
+    needs: check-updates
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download upstream source
+        run: |
+          wget -O upstream.tar.gz "https://github.com/${{ env.UPSTREAM_REPO }}/archive/${{ needs.check-updates.outputs.upstream_sha }}.tar.gz"
+          tar -xzf upstream.tar.gz
+          mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
+          rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcurl4-openssl-dev
+
+      - name: Setup Ruby for fpm
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+          bundler-cache: true
+      - name: Install fpm
+        run: |
+          gem install --no-document fpm -v "$FPM_VERSION"
+
+      - name: Build binaries
+        run: |
+          mkdir -p out
+
+          # Build for different architectures
+          # AMD64
+          make clean
+          CC=gcc CFLAGS="-Wall -m64" make
+          cp bin/metar out/metar-linux-amd64
+
+          # ARM64 (cross-compile)
+          sudo apt-get install -y gcc-aarch64-linux-gnu libcurl4-openssl-dev:arm64
+          make clean
+          CC=aarch64-linux-gnu-gcc CFLAGS="-Wall" make
+          cp bin/metar out/metar-linux-arm64
+
+          # i386
+          sudo apt-get install -y gcc-multilib libcurl4-openssl-dev:i386
+          make clean
+          CC=gcc CFLAGS="-Wall -m32" make
+          cp bin/metar out/metar-linux-i386
+
+      - name: Build Debian packages
+        run: |
+          VERSION_NO_V="${{ needs.check-updates.outputs.version }}"
+          VERSION_NO_V="${VERSION_NO_V:1}"  # Remove 'v' prefix
+
+          # Create package structure
+          mkdir -p pkg/usr/bin pkg/usr/share/man/man1
+
+          # AMD64 package
+          cp out/metar-linux-amd64 pkg/usr/bin/metar
+          cp src/metar.1 pkg/usr/share/man/man1/ || true  # Man page might not exist
+          chmod 755 pkg/usr/bin/metar
+
+          fpm -s dir -t deb \
+            -n metar \
+            -v "${VERSION_NO_V}" \
+            -a amd64 \
+            -p "out/metar_${VERSION_NO_V}_amd64.deb" \
+            --description "Command-line METAR weather data tool" \
+            --url "https://github.com/RyuKojiro/metar" \
+            --license "MIT" \
+            --maintainer "cdzombak <cdzombak@gmail.com>" \
+            --depends "libcurl4" \
+            -C pkg .
+
+          # ARM64 package
+          cp out/metar-linux-arm64 pkg/usr/bin/metar
+          fpm -s dir -t deb \
+            -n metar \
+            -v "${VERSION_NO_V}" \
+            -a arm64 \
+            -p "out/metar_${VERSION_NO_V}_arm64.deb" \
+            --description "Command-line METAR weather data tool" \
+            --url "https://github.com/RyuKojiro/metar" \
+            --license "MIT" \
+            --maintainer "cdzombak <cdzombak@gmail.com>" \
+            --depends "libcurl4" \
+            -C pkg .
+
+          # i386 package
+          cp out/metar-linux-i386 pkg/usr/bin/metar
+          fpm -s dir -t deb \
+            -n metar \
+            -v "${VERSION_NO_V}" \
+            -a i386 \
+            -p "out/metar_${VERSION_NO_V}_i386.deb" \
+            --description "Command-line METAR weather data tool" \
+            --url "https://github.com/RyuKojiro/metar" \
+            --license "MIT" \
+            --maintainer "cdzombak <cdzombak@gmail.com>" \
+            --depends "libcurl4" \
+            -C pkg .
+
+      - name: Prepare release artifacts
+        working-directory: out/
+        run: |
+          mkdir ./gh-release
+          cp ./*.deb ./gh-release/
+
+          # Create tarballs for Homebrew
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz metar-linux-amd64
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz metar-linux-arm64
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz metar-linux-amd64
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz metar-linux-arm64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: metar-artifacts
+          path: out/gh-release/*
+
+  docker:
+    name: Docker Images
+    needs: [check-updates, build]
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download upstream source
+        run: |
+          wget -O upstream.tar.gz "https://github.com/${{ env.UPSTREAM_REPO }}/archive/${{ needs.check-updates.outputs.upstream_sha }}.tar.gz"
+          tar -xzf upstream.tar.gz
+          mv metar-${{ needs.check-updates.outputs.upstream_sha }}/* .
+          rm -rf metar-${{ needs.check-updates.outputs.upstream_sha }} upstream.tar.gz
+
+      - name: Copy Dockerfile
+        run: cp Dockerfile .
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ github.repository_owner }}/metar
+            ghcr.io/${{ github.repository_owner }}/metar
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.check-updates.outputs.version }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ env.DOCKER_PLATFORMS }}
+          builder: ${{ steps.buildx.outputs.name }}
+          push: true
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+
+  finalize:
+    name: Finalize Release
+    needs: [check-updates, build, docker]
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update tracking files
+        run: |
+          echo "${{ needs.check-updates.outputs.upstream_sha }}" > LAST-COMMIT-SHA
+          echo "${{ needs.check-updates.outputs.build_date }}" > VERSION-COUNTER
+          echo "${{ needs.check-updates.outputs.counter }}" >> VERSION-COUNTER
+
+      - name: Commit tracking files
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: "LAST-COMMIT-SHA VERSION-COUNTER"
+          author_name: metar-release-bot
+          author_email: metar-release-bot@users.noreply.github.com
+          message: "Update tracking files for ${{ needs.check-updates.outputs.version }}"
+          pathspec_error_handling: exitImmediately
+          push: true
+          tag: "${{ needs.check-updates.outputs.version }}"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: metar-artifacts
+          path: out
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          prerelease: false
+          draft: false
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          tag_name: "${{ needs.check-updates.outputs.version }}"
+          name: "metar ${{ needs.check-updates.outputs.version }}"
+          body: |
+            Automated build of metar from upstream commit ${{ needs.check-updates.outputs.upstream_sha }}.
+
+            Upstream repository: https://github.com/${{ env.UPSTREAM_REPO }}
+            Upstream commit: https://github.com/${{ env.UPSTREAM_REPO }}/commit/${{ needs.check-updates.outputs.upstream_sha }}
+
+  aptly:
+    name: Aptly (3p repo)
+    needs: [check-updates, finalize]
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: metar-artifacts
+          path: out
+
+      - name: Login to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+
+      - name: Push to Aptly Repo
+        shell: bash
+        run: |
+          set -x
+          for DEB in out/*.deb; do
+            curl -u "${{ secrets.APTLY_CRED }}" \
+              -fsS -X POST \
+              -F file=@"${DEB}" \
+              "${{ secrets.APTLY_API }}/files/metar-${{ needs.check-updates.outputs.version }}"
+          done
+          curl -u "${{ secrets.APTLY_CRED }}" \
+            -fsS -X POST \
+            "${{ secrets.APTLY_API }}/repos/3p/file/metar-${{ needs.check-updates.outputs.version }}?forceReplace=1"
+
+      - name: Update Published Aptly Repo
+        run: |
+          set -x
+          curl -u "${{ secrets.APTLY_CRED }}" \
+            -fsS -X PUT \
+            -H 'Content-Type: application/json' \
+            --data '{"ForceOverwrite": true}' \
+            "${{ secrets.APTLY_API }}/publish/s3:dist.cdzombak.net:deb_3p/any?_async=true"
+
+  homebrew:
+    name: Update Homebrew Tap (3p)
+    needs: [check-updates, finalize]
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release to cdzombak/homebrew-3p tap
+        uses: Justintime50/homebrew-releaser@v2
+        with:
+          homebrew_owner: cdzombak
+          homebrew_tap: homebrew-3p
+          formula_folder: Formula
+          update_readme_table: true
+          github_token: ${{ secrets.HOMEBREW_RELEASER_PAT }}
+          commit_owner: homebrew-releaser-bot
+          commit_email: homebrew-releaser-bot@users.noreply.github.com
+          target_darwin_amd64: true
+          target_darwin_arm64: true
+          target_linux_amd64: true
+          target_linux_arm64: true
+          version: ${{ needs.check-updates.outputs.version }}
+          install: 'bin.install "metar"'
+          test: 'system "#{bin}/metar", "--help"'
+          depends_on: |
+            "curl"
