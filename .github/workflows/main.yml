@@ -428,10 +428,12 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd artifacts
-          sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz > checksums.txt
-          sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz >> checksums.txt
-          sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz >> checksums.txt
-          sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz >> checksums.txt
+          {
+            sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz
+            sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz
+            sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz
+            sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz
+          } > checksums.txt
           cat checksums.txt
 
       - name: Create/Update Homebrew formula
