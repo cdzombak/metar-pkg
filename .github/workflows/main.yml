@@ -412,22 +412,103 @@ jobs:
     if: needs.check-updates.outputs.has_updates == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Release to cdzombak/homebrew-3p tap
-        uses: Justintime50/homebrew-releaser@v2
+      - name: Checkout homebrew-3p repo
+        uses: actions/checkout@v4
         with:
-          homebrew_owner: cdzombak
-          homebrew_tap: homebrew-3p
-          formula_folder: Formula
-          update_readme_table: true
-          github_token: ${{ secrets.HOMEBREW_RELEASER_PAT }}
-          commit_owner: homebrew-releaser-bot
-          commit_email: homebrew-releaser-bot@users.noreply.github.com
-          target_darwin_amd64: true
-          target_darwin_arm64: true
-          target_linux_amd64: true
-          target_linux_arm64: true
-          version: ${{ needs.check-updates.outputs.version }}
-          install: 'bin.install "metar"'
-          test: 'system "#{bin}/metar", "--help"'
-          depends_on: |
-            "curl"
+          repository: cdzombak/homebrew-3p
+          token: ${{ secrets.HOMEBREW_RELEASER_PAT }}
+          path: homebrew-tap
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: metar-artifacts
+          path: artifacts
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd artifacts
+          sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz > checksums.txt
+          sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz >> checksums.txt
+          sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz >> checksums.txt
+          sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz >> checksums.txt
+          cat checksums.txt
+
+      - name: Create/Update Homebrew formula
+        run: |
+          VERSION_NO_V="${{ needs.check-updates.outputs.version }}"
+          VERSION_NO_V="${VERSION_NO_V:1}"  # Remove 'v' prefix
+
+          # Get checksums
+          DARWIN_AMD64_SHA=$(grep "darwin-amd64" artifacts/checksums.txt | cut -d' ' -f1)
+          DARWIN_ARM64_SHA=$(grep "darwin-arm64" artifacts/checksums.txt | cut -d' ' -f1)
+          LINUX_AMD64_SHA=$(grep "linux-amd64" artifacts/checksums.txt | cut -d' ' -f1)
+          LINUX_ARM64_SHA=$(grep "linux-arm64" artifacts/checksums.txt | cut -d' ' -f1)
+
+          # Create formula directory if it doesn't exist
+          mkdir -p homebrew-tap/Formula
+
+          # Generate formula
+          cat > homebrew-tap/Formula/metar.rb << EOF
+          class Metar < Formula
+            desc "Command-line METAR weather data tool"
+            homepage "https://github.com/RyuKojiro/metar"
+            version "${VERSION_NO_V}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz"
+                sha256 "${DARWIN_AMD64_SHA}"
+              end
+              on_arm do
+                url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz"
+                sha256 "${DARWIN_ARM64_SHA}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz"
+                sha256 "${LINUX_AMD64_SHA}"
+              end
+              on_arm do
+                url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz"
+                sha256 "${LINUX_ARM64_SHA}"
+              end
+            end
+
+            depends_on "curl"
+
+            def install
+              # Each tarball contains the binary named metar-linux-{arch}
+              # We need to rename it to just "metar" when installing
+              if OS.linux?
+                if Hardware::CPU.intel?
+                  bin.install "metar-linux-amd64" => "metar"
+                elsif Hardware::CPU.arm?
+                  bin.install "metar-linux-arm64" => "metar"
+                end
+              elsif OS.mac?
+                if Hardware::CPU.intel?
+                  bin.install "metar-linux-amd64" => "metar"
+                elsif Hardware::CPU.arm?
+                  bin.install "metar-linux-arm64" => "metar"
+                end
+              end
+            end
+
+            test do
+              system "#{bin}/metar", "--help"
+            end
+          end
+          EOF
+
+      - name: Commit and push formula
+        run: |
+          cd homebrew-tap
+          git config user.name "homebrew-releaser-bot"
+          git config user.email "homebrew-releaser-bot@users.noreply.github.com"
+          git add Formula/metar.rb
+          git commit -m "Update metar formula to ${{ needs.check-updates.outputs.version }}"
+          git push
