@@ -159,9 +159,49 @@ jobs:
           name: metar-binary-${{ matrix.platform.arch }}
           path: out/metar-linux-${{ matrix.platform.arch }}
 
+  build-macos:
+    name: Build macOS (arm64)
+    needs: check-updates
+    if: needs.check-updates.outputs.has_updates == 'true'
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download upstream source
+        run: |
+          curl -L https://github.com/RyuKojiro/metar/archive/refs/heads/master.tar.gz -o metar-source.tar.gz
+          tar -xzf metar-source.tar.gz
+          mv metar-master src
+
+      - name: Install dependencies
+        run: |
+          # macOS should already have curl via system or Xcode command line tools
+          # libcurl is available via system
+          echo "Dependencies already available on macOS"
+
+      - name: Build binary
+        run: |
+          mkdir -p out
+          cd src
+          # Build with system libcurl on macOS
+          gcc -Wall -o ../out/metar-darwin-arm64 main.c -lcurl
+
+          echo "=== Binary info ==="
+          file ../out/metar-darwin-arm64
+          echo "=== Binary size ==="
+          ls -lh ../out/metar-darwin-arm64
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: metar-binary-darwin-arm64
+          path: out/metar-darwin-arm64
+
   package:
     name: Build Packages
-    needs: [check-updates, build]
+    needs: [check-updates, build, build-macos]
     if: needs.check-updates.outputs.has_updates == 'true'
     runs-on: ubuntu-latest
 
@@ -237,13 +277,15 @@ jobs:
           mkdir ./gh-release
           cp ./*.deb ./gh-release/
 
-          # Create tarballs for Homebrew from binaries (only amd64 and arm64 for Darwin)
+          # Create Linux tarballs
           for arch in amd64 arm64; do
-            tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
             tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-${arch}.tar.gz -C ../binaries/metar-binary-${arch} metar-linux-${arch}
           done
           # Create Linux armv7 tarball
           tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-linux-armv7.tar.gz -C ../binaries/metar-binary-armv7 metar-linux-armv7
+
+          # Create Darwin arm64 tarball from macOS binary
+          tar -czf ./gh-release/metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz -C ../binaries/metar-binary-darwin-arm64 metar-darwin-arm64
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -429,7 +471,6 @@ jobs:
         run: |
           cd artifacts
           {
-            sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz
             sha256sum metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz
             sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-amd64.tar.gz
             sha256sum metar-${{ needs.check-updates.outputs.version }}-linux-arm64.tar.gz
@@ -442,7 +483,6 @@ jobs:
           VERSION_NO_V="${VERSION_NO_V:1}"  # Remove 'v' prefix
 
           # Get checksums
-          DARWIN_AMD64_SHA=$(grep "darwin-amd64" artifacts/checksums.txt | cut -d' ' -f1)
           DARWIN_ARM64_SHA=$(grep "darwin-arm64" artifacts/checksums.txt | cut -d' ' -f1)
           LINUX_AMD64_SHA=$(grep "linux-amd64" artifacts/checksums.txt | cut -d' ' -f1)
           LINUX_ARM64_SHA=$(grep "linux-arm64" artifacts/checksums.txt | cut -d' ' -f1)
@@ -459,13 +499,11 @@ jobs:
             license "MIT"
 
             on_macos do
-              on_intel do
-                url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-darwin-amd64.tar.gz"
-                sha256 "${DARWIN_AMD64_SHA}"
-              end
-              on_arm do
+              if Hardware::CPU.arm?
                 url "https://github.com/cdzombak/metar-pkg/releases/download/${{ needs.check-updates.outputs.version }}/metar-${{ needs.check-updates.outputs.version }}-darwin-arm64.tar.gz"
                 sha256 "${DARWIN_ARM64_SHA}"
+              else
+                odie "Intel Macs are not supported. Please use an Apple Silicon Mac."
               end
             end
 
@@ -483,7 +521,7 @@ jobs:
             depends_on "curl"
 
             def install
-              # Each tarball contains the binary named metar-linux-{arch}
+              # Each tarball contains the binary named appropriately for the platform
               # We need to rename it to just "metar" when installing
               if OS.linux?
                 if Hardware::CPU.intel?
@@ -492,10 +530,10 @@ jobs:
                   bin.install "metar-linux-arm64" => "metar"
                 end
               elsif OS.mac?
-                if Hardware::CPU.intel?
-                  bin.install "metar-linux-amd64" => "metar"
-                elsif Hardware::CPU.arm?
-                  bin.install "metar-linux-arm64" => "metar"
+                if Hardware::CPU.arm?
+                  bin.install "metar-darwin-arm64" => "metar"
+                else
+                  odie "Intel Macs are not supported. Please use an Apple Silicon Mac."
                 end
               end
             end
